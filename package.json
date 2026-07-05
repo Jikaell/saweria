@@ -1,0 +1,13 @@
+{
+  "name": "saweria-roblox-relay",
+  "version": "1.0.0",
+  "description": "Nerima webhook Saweria, antrikan donasi, dan disediakan buat di-poll server Roblox",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "saweria-webhook-express": "^1.1.0"
+  }
+}
