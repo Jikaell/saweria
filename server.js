@@ -7,18 +7,26 @@
 //   PORT               = port server (opsional, default 8080)
 
 const express = require("express");
-const { createMiddleware } = require("saweria-webhook-express");
 
-const STREAM_KEY = process.env.SAWERIA_STREAM_KEY;
 const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const PORT = process.env.PORT || 8080;
 
-if (!STREAM_KEY || !ROBLOX_API_KEY) {
-  console.error("SAWERIA_STREAM_KEY dan ROBLOX_API_KEY wajib di-set di environment variables.");
+if (!ROBLOX_API_KEY) {
+  console.error("ROBLOX_API_KEY wajib di-set di environment variables.");
+  process.exit(1);
+}
+if (!ADMIN_PASSWORD) {
+  console.error("ADMIN_PASSWORD wajib di-set di environment variables (buat proteksi form manual).");
   process.exit(1);
 }
 
 const app = express();
+app.use(express.json());
+
+// Fitur "Webhook" Saweria yang sekarang cuma butuh URL, gak ada stream key/signature.
+// Jadi URL webhook ini sendiri yang jadi "rahasia" -> jangan sampai bocor/ketebak orang lain.
+// Kalau mau lebih aman, kasih path acak, misal: /webhook/x7Jk29Qz
 
 // Antrian donasi di memory. Setiap donasi diambil sekali oleh Roblox lalu dihapus dari sini.
 let donationQueue = [];
@@ -33,22 +41,31 @@ function extractRobloxUsername(message) {
   return match ? match[1] : null;
 }
 
-const verifySaweriaSignature = createMiddleware(STREAM_KEY);
-
-app.post("/webhook", verifySaweriaSignature, express.json(), (req, res) => {
+app.post("/webhook", (req, res) => {
   const body = req.body || {};
 
+  // LOG MENTAH dulu -> penting buat ngecek nama field asli yang Saweria kirim.
+  // Cek log hosting (Render: tab "Logs") abis klik "Muncul Notifikasi" (tombol test) di
+  // saweria.co/admin/integrations -> Webhook, terus cocokin nama field di bawah ini kalau beda.
+  console.log("RAW payload dari Saweria:", JSON.stringify(body));
+
+  // Coba beberapa kemungkinan nama field (dokumentasi resmi Saweria buat fitur Webhook ini
+  // gak lengkap, jadi kita jaga-jaga beberapa variasi nama).
+  const donatorName = body.donator_name || body.donator || body.name || "Anonim";
+  const amountRaw = Number(body.amount_raw ?? body.amount ?? 0);
+  const message = body.message || body.pesan || "";
+
   const donation = {
-    id: body.id,
-    donator_name: body.donator_name || "Anonim",
-    amount_raw: Number(body.amount_raw) || 0,
-    message: body.message || "",
-    roblox_username: extractRobloxUsername(body.message),
+    id: body.id || Date.now().toString(),
+    donator_name: donatorName,
+    amount_raw: amountRaw,
+    message: message,
+    roblox_username: extractRobloxUsername(message),
     created_at: body.created_at || new Date().toISOString(),
   };
 
   donationQueue.push(donation);
-  console.log("Donasi masuk:", donation);
+  console.log("Donasi masuk (udah diparse):", donation);
 
   res.sendStatus(200);
 });
@@ -68,6 +85,108 @@ app.get("/poll", (req, res) => {
 
 app.get("/", (req, res) => {
   res.send("saweria-roblox-relay jalan. Antrian saat ini: " + donationQueue.length);
+});
+
+// Halaman form manual buat masukin donasi tanpa lewat Saweria (misal transfer manual, dll)
+app.get("/manual", (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Manual Donation</title>
+<style>
+  body { font-family: sans-serif; max-width: 420px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 20px; }
+  label { display: block; margin-top: 12px; font-weight: bold; }
+  input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+  button { margin-top: 16px; width: 100%; padding: 10px; font-weight: bold; cursor: pointer; }
+  #status { margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h1>Manual Donation</h1>
+  <form id="form">
+    <label>Password</label>
+    <input type="password" id="password" required>
+
+    <label>Username Roblox</label>
+    <input type="text" id="robloxUsername" required>
+
+    <label>Pesan</label>
+    <input type="text" id="message" placeholder="(opsional)">
+
+    <label>Jumlah (Rupiah)</label>
+    <input type="number" id="amount" min="1" required>
+
+    <button type="submit">Kirim Donasi</button>
+  </form>
+  <div id="status"></div>
+
+<script>
+document.getElementById("form").addEventListener("submit", async function (e) {
+  e.preventDefault();
+  const statusEl = document.getElementById("status");
+  statusEl.textContent = "Mengirim...";
+
+  const payload = {
+    password: document.getElementById("password").value,
+    robloxUsername: document.getElementById("robloxUsername").value,
+    message: document.getElementById("message").value,
+    amount: document.getElementById("amount").value,
+  };
+
+  try {
+    const res = await fetch("/manual-donate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      statusEl.textContent = "Berhasil dikirim!";
+      document.getElementById("form").reset();
+    } else {
+      const text = await res.text();
+      statusEl.textContent = "Gagal: " + text;
+    }
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+  }
+});
+</script>
+</body>
+</html>`);
+});
+
+app.post("/manual-donate", (req, res) => {
+  const body = req.body || {};
+
+  if (body.password !== ADMIN_PASSWORD) {
+    return res.status(401).send("Password salah");
+  }
+
+  const robloxUsername = (body.robloxUsername || "").trim();
+  const amountRaw = Number(body.amount);
+
+  if (!robloxUsername) {
+    return res.status(400).send("Username Roblox wajib diisi");
+  }
+  if (!amountRaw || amountRaw <= 0) {
+    return res.status(400).send("Jumlah harus angka lebih dari 0");
+  }
+
+  const donation = {
+    id: "manual-" + Date.now(),
+    donator_name: robloxUsername,
+    amount_raw: amountRaw,
+    message: body.message || "",
+    roblox_username: robloxUsername,
+    created_at: new Date().toISOString(),
+  };
+
+  donationQueue.push(donation);
+  console.log("Donasi manual masuk:", donation);
+
+  res.sendStatus(200);
 });
 
 app.listen(PORT, () => {
